@@ -1,87 +1,140 @@
-require('dotenv').config();
 const puppeteer = require('puppeteer');
 const express = require('express');
-const cheerio = require('cheerio');
-const { extractName, extractRoomId, extractTotalReviews, extractScore, extractPrice } = require('./scrapers/extractors');
 
 const app = express();
 const port = 3000;
 
 app.use(express.json());
 
-const AIRBNB_URL = process.env.AIRBNB_URL;
-
 async function getAirbnbListingDetails(airbnbUrl) {
-
     let browser;
     try {
         browser = await puppeteer.launch({
-            headless: false,
-            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-web-security', '--disable-gpu', '--enable-logging', '--disable-dev-shm-usage', '--incognito']
+            headless: 'new',
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-web-security',
+                '--disable-gpu',
+                '--enable-logging',
+                '--disable-dev-shm-usage',
+                '--incognito'
+            ]
         });
         const page = await browser.newPage();
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
         await page.setViewport({ width: 1440, height: 900 });
 
-        const startTime = Date.now();
-
         await page.goto(airbnbUrl, { waitUntil: 'domcontentloaded', timeout: 90000 });
 
         const itemSelector = 'div[itemprop="itemListElement"]';
-        const expectedMinCount = 18;
+        const expectedMinCount = 18; // Número mínimo esperado de anúncios para considerar a página carregada
 
         try {
+            // Espera até que um número mínimo de elementos de listagem seja carregado
             await page.waitForFunction(
                 (selector, expectedCount) => {
                     return document.querySelectorAll(selector).length >= expectedCount;
                 },
-                { timeout: 60000, polling: 'raf' },
+                { timeout: 60000, polling: 'raf' }, // Timeout de 60 segundos, polling via requestAnimationFrame
                 itemSelector,
                 expectedMinCount
             );
-
-            const endTime = Date.now();
-            console.log(`Tempo para encontrar ${expectedMinCount} elementos: ${endTime - startTime}ms`);
-
-            for (let i = 0; i < 3; i++) {
-                await page.evaluate(() => {
-                    window.scrollBy(0, window.innerHeight * 0.8);
-                });
-            }
         } catch (waitError) {
-            console.log(`Tempo parcial (falha na espera): ${Date.now() - startTime}ms`);
+            console.warn(`Aviso: Não foi possível encontrar o número mínimo esperado de elementos da lista '${itemSelector}' após 60 segundos. Pode indicar que a página não carregou completamente ou que o seletor está desatualizado. Erro: ${waitError.message}`);
+            // Retorna um array vazio se não conseguir encontrar o número mínimo de elementos.
+            // O código continuará a tentar extrair o que estiver disponível.
         }
 
-        const elementsHtml = await page.evaluate((selector) => {
+        const listings = await page.evaluate((selector) => {
             const elements = document.querySelectorAll(selector);
-            return Array.from(elements).map(el => el.outerHTML);
+            const data = [];
+            const roomIdRegex = /\/rooms\/(\d+)\?/;
+
+            elements.forEach(el => {
+                let name = null;
+                let roomId = null;
+                let totalReviews = null;
+                let score = null;
+                let price = null;
+
+                const nameMeta = el.querySelector('meta[itemprop="name"]');
+                if (nameMeta) {
+                    name = nameMeta.getAttribute('content');
+                }
+
+                const urlMeta = el.querySelector('meta[itemprop="url"]');
+                if (urlMeta) {
+                    const fullUrl = urlMeta.getAttribute('content');
+                    const match = fullUrl.match(roomIdRegex);
+                    if (match && match[1]) {
+                        roomId = match[1];
+                    }
+                }
+
+                const reviewScoreCombinedElement = el.querySelector('span.i1wps776.dir.dir-ltr'); 
+                if (reviewScoreCombinedElement) {
+                    const textContent = reviewScoreCombinedElement.textContent;
+                    const reviewMatch = textContent.match(/\((\d+)\)/); 
+                    if (reviewMatch) {
+                        totalReviews = parseInt(reviewMatch[1], 10);
+                    }
+                    const scoreMatch = textContent.match(/(\d+\.\d+)\s*\u00B7|\u00B7\s*(\d+\.\d+)/); 
+                    if (scoreMatch) {
+                        score = parseFloat(scoreMatch[1] || scoreMatch[2]);
+                    }
+                } else {
+                    const scoreSpan = el.querySelector('span[aria-label^="Avaliação média de"]');
+                    if (scoreSpan) {
+                        const scoreText = scoreSpan.getAttribute('aria-label');
+                        const scoreValMatch = scoreText.match(/(\d+(\.\d+)?)/);
+                        if (scoreValMatch) {
+                            score = parseFloat(scoreValMatch[1]);
+                        }
+                    }
+                    const reviewsTextSpan = el.querySelector('span.r1dxs1cn'); 
+                    if (reviewsTextSpan) {
+                        const reviewsText = reviewsTextSpan.textContent;
+                        const totalReviewsMatch = reviewsText.match(/\((\d+)\)/);
+                        if (totalReviewsMatch) {
+                            totalReviews = parseInt(totalReviewsMatch[1], 10);
+                        }
+                    }
+                }
+                
+                let rawPriceText = null;
+                const priceElement = el.querySelector('div._tt122r span._tyxjp1'); 
+                if (priceElement) {
+                    rawPriceText = priceElement.textContent;
+                } else {
+                    const buttons = el.querySelectorAll('button[type="button"]');
+                    buttons.forEach(button => {
+                        const priceSpan = Array.from(button.querySelectorAll('span')).find(span => span.textContent.trim().startsWith('R$'));
+                        if (priceSpan) {
+                            rawPriceText = priceSpan.textContent.trim();
+                        }
+                    });
+                }
+                if (rawPriceText) {
+                    price = parseFloat(rawPriceText.replace('R$', '').replace(/\./g, '').replace(',', '.'));
+                }
+
+                if (name || roomId) {
+                    data.push({
+                        name,
+                        roomId,
+                        total_reviews: totalReviews,
+                        score,
+                        price
+                    });
+                }
+            });
+            return data;
         }, itemSelector);
-
-        const listings = [];
-        for (const html of elementsHtml) {
-            const $ = cheerio.load(html);
-            const element = $('div[itemprop="itemListElement"]').get(0);
-
-            const name = extractName($, element);
-            const roomId = extractRoomId($, element);
-            const totalReviews = extractTotalReviews($, element);
-            const score = extractScore($, element);
-            const price = extractPrice($, element);
-
-            if (name || roomId) {
-                listings.push({
-                    name,
-                    roomId,
-                    total_reviews: totalReviews,
-                    score,
-                    price
-                });
-            }
-        }
 
         return listings;
     } catch (error) {
-        console.error('Erro ao raspar Airbnb:', error);
+        console.error(`Erro ao obter detalhes da listagem do Airbnb: ${error.message}`);
         return null;
     } finally {
         if (browser) {
@@ -90,65 +143,55 @@ async function getAirbnbListingDetails(airbnbUrl) {
     }
 }
 
-async function scrapeAndSave(maxPagesToScrape, enableWait) {
-    if (!AIRBNB_URL) {
-        throw new Error('URL do Airbnb não fornecida. Defina a variável de ambiente AIRBNB_URL.');
-    }
-    let currentPage = 0;
-    const allData = [];
-    let firstPageUrl = AIRBNB_URL;
+async function scrapeAirbnbPage(baseAirbnbUrl, pageNumber) {
+    let airbnbUrl = baseAirbnbUrl;
 
-    while (currentPage < maxPagesToScrape) {
-        let airbnbUrl = AIRBNB_URL;
-        if (currentPage > 0) {
-            const offset = 18 * currentPage;
-            const cursorObject = {
-                section_offset: 0,
-                items_offset: offset,
-                version: 1
-            };
-            const cursor = Buffer.from(JSON.stringify(cursorObject)).toString('base64');
-            airbnbUrl = `${AIRBNB_URL}&cursor=${encodeURIComponent(cursor)}`;
-        }
-
-        const scrapedData = await getAirbnbListingDetails(airbnbUrl);
-
-        if (!scrapedData || scrapedData.length === 0) {
-            break;
-        }
-
-        const formattedData = scrapedData.map((item, index) => ({
-            room_id: item.roomId,
-            title: item.name,
-            total_reviews: item.total_reviews,
-            score: item.score,
-            price: item.price ? parseFloat(item.price) : null,
-            position: currentPage * 18 + index + 1
-        }));
-
-        allData.push(...formattedData);
-        currentPage++;
-
-        if (enableWait) {
-            await new Promise(resolve => setTimeout(resolve, 2000));
-        }
+    if (pageNumber > 0) {
+        const offset = 18 * pageNumber;
+        const cursorObject = {
+            section_offset: 0,
+            items_offset: offset,
+            version: 1
+        };
+        const cursor = Buffer.from(JSON.stringify(cursorObject)).toString('base64');
+        airbnbUrl = `${baseAirbnbUrl}&cursor=${encodeURIComponent(cursor)}`;
     }
 
-    return { data: allData, firstPageUrl };
+    const scrapedData = await getAirbnbListingDetails(airbnbUrl);
+
+    if (!scrapedData || scrapedData.length === 0) {
+        return { data: [], requestedPageUrl: airbnbUrl };
+    }
+
+    const formattedData = scrapedData.map((item, index) => ({
+        room_id: item.roomId,
+        title: item.name,
+        total_reviews: item.total_reviews,
+        score: item.score,
+        price: item.price,
+        position: pageNumber * 18 + index + 1
+    }));
+
+    return { data: formattedData, requestedPageUrl: airbnbUrl };
 }
 
 app.post('/scrape', async (req, res) => {
     try {
-        const maxPagesToScrape = req.body.max_pages || 1;
-        const enableWait = req.body.enable_wait || false;
+        const page = req.body.page || 0;
+        const airbnbUrl = req.body.airbnbUrl;
 
-        const result = await scrapeAndSave(maxPagesToScrape, enableWait);
+        if (!airbnbUrl) {
+            return res.status(400).json({ error: 'A URL do Airbnb é obrigatória no corpo da requisição.' });
+        }
+
+        const result = await scrapeAirbnbPage(airbnbUrl, page);
         res.json(result);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        console.error(`Erro na rota /scrape: ${error.message}`);
+        res.status(500).json({ error: 'Erro interno do servidor ao processar a requisição.' });
     }
 });
 
 app.listen(port, () => {
-    console.log(`API rodando em http://localhost:${port}`);
+    console.log(`Servidor rodando em http://localhost:${port}`);
 });
