@@ -72,16 +72,22 @@ async function getAirbnbListingDetails(airbnbUrl) {
                     }
                 }
 
-                const reviewScoreCombinedElement = el.querySelector('span.i1wps776.dir.dir-ltr'); 
-                if (reviewScoreCombinedElement) {
-                    const textContent = reviewScoreCombinedElement.textContent;
-                    const reviewMatch = textContent.match(/\((\d+)\)/); 
-                    if (reviewMatch) {
-                        totalReviews = parseInt(reviewMatch[1], 10);
-                    }
-                    const scoreMatch = textContent.match(/(\d+\.\d+)\s*\u00B7|\u00B7\s*(\d+\.\d+)/); 
-                    if (scoreMatch) {
-                        score = parseFloat(scoreMatch[1] || scoreMatch[2]);
+                const targetSvg = el.querySelector('svg:has(path[fill-rule="evenodd"])');
+                if (targetSvg) {
+                    const immediateParentSpan = targetSvg.parentNode;
+                    if (immediateParentSpan) {
+                        const grandParentSpan = immediateParentSpan.parentNode;
+                        if (grandParentSpan) {
+                            const ratingSpan = grandParentSpan.querySelector(':scope > span:last-child');
+                            if (ratingSpan) {
+                                const textContent = ratingSpan.textContent.trim();
+                                const match = textContent.match(/(\d+,\d+)\s*\((\d+)\)/);
+                                if (match) {
+                                    score = parseFloat(match[1].replace(',', '.'));
+                                    totalReviews = parseInt(match[2], 10);
+                                }
+                            }
+                        }
                     }
                 } else {
                     const scoreSpan = el.querySelector('span[aria-label^="Avaliação média de"]');
